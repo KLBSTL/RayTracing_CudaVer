@@ -22,7 +22,12 @@
 #include "vec3.h"
 #include "primitive.h"
 #include "bvh.h"
+#include "model.h"
 #include "stb_image_write.h"
+
+#ifndef RT_ENABLE_ASSIMP_MODEL
+#define RT_ENABLE_ASSIMP_MODEL 0
+#endif
 
 
 #define checkCudaErrors(val) check_cuda( (val), #val, __FILE__, __LINE__ )
@@ -403,6 +408,80 @@ __global__ void render(vec3 *fb, int max_x, int max_y, int ns, camera **cam,
 }
 
 
+inline Material make_lambertian_material(const vec3& albedo) {
+    Material mat{};
+    mat.type = Lambertian;
+    mat.albedo = albedo;
+    mat.ref_idx = 1.0f;
+    return mat;
+}
+
+inline Material make_metal_material(const vec3& albedo, float fuzz) {
+    Material mat{};
+    mat.type = Metal;
+    mat.albedo = albedo;
+    mat.fuzz = fuzz;
+    mat.ref_idx = 1.0f;
+    return mat;
+}
+
+inline Material make_dielectric_material(float ref_idx) {
+    Material mat{};
+    mat.type = Dielectric;
+    mat.ref_idx = ref_idx;
+    return mat;
+}
+
+inline void add_sphere_primitive(
+    std::vector<primitive>& prims,
+    std::vector<sphereData>& spheres,
+    std::vector<Material>& mats,
+    const vec3& center,
+    float radius,
+    const Material& mat
+) {
+    const int material_id = static_cast<int>(mats.size());
+    mats.push_back(mat);
+
+    const int sphere_id = static_cast<int>(spheres.size());
+    spheres.push_back(make_sphere(center, radius));
+    prims.push_back({PRIM_sphere, sphere_id, material_id});
+}
+
+inline void add_quad_primitive(
+    std::vector<primitive>& prims,
+    std::vector<quadData>& quads,
+    std::vector<Material>& mats,
+    const vec3& Q,
+    const vec3& u,
+    const vec3& v,
+    const Material& mat
+) {
+    const int material_id = static_cast<int>(mats.size());
+    mats.push_back(mat);
+
+    const int quad_id = static_cast<int>(quads.size());
+    quads.push_back(make_quad(Q, u, v));
+    prims.push_back({PRIM_quad, quad_id, material_id});
+}
+
+inline void add_triangle_primitive(
+    std::vector<primitive>& prims,
+    std::vector<triangleData>& triangles,
+    std::vector<Material>& mats,
+    const vec3& a,
+    const vec3& b,
+    const vec3& c,
+    const Material& mat
+) {
+    const int material_id = static_cast<int>(mats.size());
+    mats.push_back(mat);
+
+    const int triangle_id = static_cast<int>(triangles.size());
+    triangles.push_back(make_triangle(a, b, c));
+    prims.push_back({PRIM_triangle, triangle_id, material_id});
+}
+
 void create_world(
     std::vector<primitive> &prim,
     std::vector<sphereData> &spheres,
@@ -412,74 +491,102 @@ void create_world(
     // camera **d_camera,
     int nx, int ny)
 {
+        prim.clear();
+        spheres.clear();
+        quads.clear();
+        triangles.clear();
+        mats.clear();
 
-        prim[0] = {PRIM_sphere, 0, 0};
-        spheres[0] = make_sphere(vec3(0, -1000.0f, -1), 1000.0f);
+        prim.reserve(22 * 22 + 3);
+        spheres.reserve(22 * 22 + 1);
+        quads.reserve(1);
+        triangles.reserve(1);
+        mats.reserve(22 * 22 + 3);
 
-        mats[0] = {Lambertian,vec3(0.5, 0.5, 0.5)};
+        add_sphere_primitive(
+            prim,
+            spheres,
+            mats,
+            vec3(0, -1000.0f, -1),
+            1000.0f,
+            make_lambertian_material(vec3(0.5f, 0.5f, 0.5f))
+        );
 
-        int p_id = 1;
-        int s_id = 1;
-        int q_id = 0;
-        int t_id = 0;
-
-
-        int m_id = 1;
         for(int a = -11; a < 11; a++) {
             for(int b = -11; b < 11; b++) {
                 float choose_mat = random();
                 vec3 center(a+random(),0.2f + random() * 0.4f,b+random());
+                const float radius = 0.2f + random() * 0.1f;
                 if(choose_mat < 0.8f) {
-                    mats[m_id] = {Lambertian,vec3(random()*random(), random()*random(), random()*random())};
-                    prim[p_id] = {PRIM_sphere, s_id, m_id};
-                    spheres[s_id] = make_sphere(center, 0.2f + random() * 0.1f);
-                    p_id++;
-                    s_id++;
-                    m_id++;
+                    add_sphere_primitive(
+                        prim,
+                        spheres,
+                        mats,
+                        center,
+                        radius,
+                        make_lambertian_material(vec3(random()*random(), random()*random(), random()*random()))
+                    );
                 }
                 else if(choose_mat < 0.95f) {
-                    mats[m_id] = {Metal,vec3(0.5f*(1.0f+random()), 0.5f*(1.0f+random()), 0.5f*(1.0f+random())),0.5f*(1.0f+random())};
-                    prim[p_id] = {PRIM_sphere, s_id, m_id};
-                    spheres[s_id] = make_sphere(center, 0.2f + random() * 0.1f);
-                    p_id++;
-                    s_id++;
-                    m_id++;
+                    add_sphere_primitive(
+                        prim,
+                        spheres,
+                        mats,
+                        center,
+                        radius,
+                        make_metal_material(
+                            vec3(0.5f*(1.0f+random()), 0.5f*(1.0f+random()), 0.5f*(1.0f+random())),
+                            0.5f*(1.0f+random())
+                        )
+                    );
                 }
                 else {
-                    mats[m_id] = {Dielectric,vec3(0,0,0),0,1.4f + random() * 0.2f};
-                    prim[p_id] = {PRIM_sphere, s_id, m_id};
-                    spheres[s_id] = make_sphere(center, 0.2f + random() * 0.1f);
-                    p_id++;
-                    s_id++;
-                    m_id++;
+                    add_sphere_primitive(
+                        prim,
+                        spheres,
+                        mats,
+                        center,
+                        radius,
+                        make_dielectric_material(1.4f + random() * 0.2f)
+                    );
                 }
             }
         }
 
+        // add_quad_primitive(
+        //     prim,
+        //     quads,
+        //     mats,
+        //     vec3(-1.7f, 0.8f, -1.2f),
+        //     vec3(3.4f, 0.0f, 0.0f),
+        //     vec3(0.0f, 2.1f, 0.0f),
+        //     make_lambertian_material(vec3(0.95f, 0.18f, 0.12f))
+        // );
+        //
+        // add_triangle_primitive(
+        //     prim,
+        //     triangles,
+        //     mats,
+        //     vec3(2.0f, 0.8f, 0.6f),
+        //     vec3(4.2f, 0.8f, -0.2f),
+        //     vec3(3.0f, 3.0f, 0.2f),
+        //     make_lambertian_material(vec3(0.10f, 0.45f, 0.95f))
+        // );
 
-        mats[m_id] = {Lambertian,vec3(0.95f, 0.18f, 0.12f)};
-        prim[p_id] = {PRIM_quad, q_id, m_id};
-        quads[q_id] = make_quad(
-            vec3(-1.7f, 0.8f, -1.2f),
-            vec3(3.4f, 0.0f, 0.0f),
-            vec3(0.0f, 2.1f, 0.0f)
-        );
-        p_id++;
-        q_id++;
-        m_id++;
-
-
-        mats[m_id] = {Lambertian,vec3(0.10f, 0.45f, 0.95f)};
-        prim[p_id] = {PRIM_triangle, t_id, m_id};
-        triangles[t_id] = make_triangle(
-            vec3(2.0f, 0.8f, 0.6f),
-            vec3(4.2f, 0.8f, -0.2f),
-            vec3(3.0f, 3.0f, 0.2f)
-        );
-        p_id++;
-        t_id++;
-        m_id++;
-
+#if RT_ENABLE_ASSIMP_MODEL
+        const std::string model_path = "D:/ClionFlies/rayTracingRenderer/resources/backpack/backpack.obj";
+        Model backpack(model_path);
+        if (backpack.loaded()) {
+            const size_t old_prim_count = prim.size();
+            backpack.append_to_scene(
+                prim,
+                triangles,
+                mats,
+                make_lambertian_material(vec3(0.72f, 0.72f, 0.72f))
+            );
+            std::cerr << "Loaded model primitives: " << prim.size() - old_prim_count << "\n";
+        }
+#endif
 
 
         // vec3 lookfrom(13,2,3);
@@ -508,10 +615,6 @@ class scene {
     }
 
     void init() {
-        int sphere_count = 22*22 + 1;
-        int quad_count = 1;
-        int triangle_count = 1;
-        counts = sphere_count + quad_count + triangle_count;
         num_pixels = nx*ny;
         fb_size = num_pixels*sizeof(vec3);
 
@@ -535,18 +638,21 @@ class scene {
         checkCudaErrors(cudaDeviceSynchronize());
 
 
-        h_prims.resize(counts);
-        h_spheres.resize(sphere_count);
-        h_quads.resize(quad_count);
-        h_triangles.resize(triangle_count);
-        h_mats.resize(counts);
-
         create_world(h_prims,h_spheres,h_quads,h_triangles,h_mats,nx,ny);
+        counts = static_cast<int>(h_prims.size());
+        const int sphere_count = static_cast<int>(h_spheres.size());
+        const int quad_count = static_cast<int>(h_quads.size());
+        const int triangle_count = static_cast<int>(h_triangles.size());
+        std::cerr << "Scene primitives: " << counts
+                  << " (spheres " << sphere_count
+                  << ", quads " << quad_count
+                  << ", triangles " << triangle_count << ")\n";
+
         h_bvh.build(h_prims, h_spheres.data(), h_triangles.data(), h_quads.data());
 
 
         bvh_root = h_bvh.root_index;
-        bvh_node_count = h_bvh.nodes.size();
+        bvh_node_count = static_cast<int>(h_bvh.nodes.size());
 
         checkCudaErrors(cudaMalloc(&bvh_nodes, bvh_node_count * sizeof(BVHNode)));
         checkCudaErrors(cudaMemcpy(bvh_nodes, h_bvh.nodes.data(),
@@ -675,7 +781,7 @@ private:
     int tx = 16;
     int ty = 16;
 
-    primitive *prims;
+    primitive *prims = nullptr;
     Material *mats = nullptr;
     sphereData * spheres = nullptr;
     triangleData * triangles = nullptr;
@@ -692,7 +798,7 @@ private:
     int counts;
 
 
-    vec3 *fb;
+    vec3 *fb = nullptr;
     int num_pixels;
     size_t fb_size;
 
@@ -701,8 +807,8 @@ private:
     dim3 blocks;
     dim3 threads;
 
-    curandState *d_rand_state;
-    curandState *d_rand_state2;
+    curandState *d_rand_state = nullptr;
+    curandState *d_rand_state2 = nullptr;
 
 
     BVHNode* bvh_nodes = nullptr;

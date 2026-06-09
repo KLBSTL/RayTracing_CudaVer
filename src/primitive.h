@@ -4,6 +4,8 @@
 
 #ifndef PRIMITIVE_H
 #define PRIMITIVE_H
+#include <string>
+
 #include "aabb.h"
 #include "vec3.h"
 
@@ -46,6 +48,25 @@ struct primitive {
     PrimitiveType type;
     int data_index;
     int material_id;
+};
+
+struct Vertex {
+    // position
+    vec3 Position;
+    // normal
+    vec3 Normal;
+    // texCoords
+    vec2 TexCoords;
+    // tangent
+    vec3 Tangent;
+    // bitangent
+    vec3 Bitangent;
+};
+
+struct Texture {
+    unsigned int id;
+    std::string type;
+    std::string path;
 };
 
 __host__ __device__ inline vec3 safe_unit_vector(const vec3& v) {
@@ -98,6 +119,35 @@ __host__ __device__ inline triangleData make_triangle(
     triangle.c = c;
     triangle.e1 = b - a;
     triangle.e2 = c - a;
+    vec3 n = cross(triangle.e1, triangle.e2);
+    triangle.area = 0.5f * n.length();
+    triangle.normal = safe_unit_vector(n);
+    triangle.uv0 = uv0;
+    triangle.uv1 = uv1;
+    triangle.uv2 = uv2;
+
+    auto b1 = aabb(triangle.a, triangle.b);
+    auto b2 = aabb(triangle.c, triangle.c);
+
+    triangle.bbox = aabb(b1, b2);
+
+    return triangle;
+}
+
+__host__ __device__ inline triangleData make_triangle(
+    const Vertex& a,
+    const Vertex& b,
+    const Vertex& c,
+    const vec2& uv0 = vec2(0.0f, 0.0f),
+    const vec2& uv1 = vec2(1.0f, 0.0f),
+    const vec2& uv2 = vec2(0.0f, 1.0f)
+) {
+    triangleData triangle;
+    triangle.a = a.Position;
+    triangle.b = b.Position;
+    triangle.c = c.Position;
+    triangle.e1 = b.Position - a.Position;
+    triangle.e2 = c.Position - a.Position;
     vec3 n = cross(triangle.e1, triangle.e2);
     triangle.area = 0.5f * n.length();
     triangle.normal = safe_unit_vector(n);
