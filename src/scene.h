@@ -45,7 +45,7 @@ __device__ bool hit_sphere(const sphereData &sphere,const ray& r, float t_min, f
         float temp = (-b - sqrt(discriminant))/a;
         if (temp < t_max && temp > t_min) {
             rec.t = temp;
-            rec.p = r.point_at_parameter(rec.t);
+            rec.p = r.at(rec.t);
             rec.normal = (rec.p - sphere.center) / sphere.radius;
             rec.material_id = id;
             return true;
@@ -53,7 +53,7 @@ __device__ bool hit_sphere(const sphereData &sphere,const ray& r, float t_min, f
         temp = (-b + sqrt(discriminant)) / a;
         if (temp < t_max && temp > t_min) {
             rec.t = temp;
-            rec.p = r.point_at_parameter(rec.t);
+            rec.p = r.at(rec.t);
             rec.normal = (rec.p - sphere.center) / sphere.radius;
             rec.material_id = id;
             return true;
@@ -61,6 +61,81 @@ __device__ bool hit_sphere(const sphereData &sphere,const ray& r, float t_min, f
     }
     return false;
 }
+
+__device__ bool contains(float tmin,float tmax,float t) {
+    return tmin <= t && t <= tmax;
+}
+
+__device__ bool hit_quad(const quadData &quad,const ray& r, float t_min, float t_max, hit_record& rec,int id) {
+
+    auto denom = dot(quad.normal, r.direction());
+
+    // No hit if the ray is parallel to the plane.
+    if (std::fabs(denom) < 1e-8)
+        return false;
+
+    // Return false if the hit point parameter t is outside the ray interval.
+    auto t = (quad.D - dot(quad.normal, r.origin())) / denom;
+    if (!contains(t_min,t_max,t))
+        return false;
+
+    // Determine if the hit point lies within the planar shape using its plane coordinates.
+    auto intersection = r.at(t);
+    vec3 planar_hitpt_vector = intersection - quad.Q;
+    auto alpha = dot(quad.w, cross(planar_hitpt_vector, quad.v));
+    auto beta = dot(quad.w, cross(quad.u, planar_hitpt_vector));
+
+    if (!contains(0,1,alpha) || !contains(0,1,beta)) {
+        return false;
+    }
+
+    rec.u = alpha;
+    rec.v = beta;
+
+    // Ray hits the 2D shape; set the rest of the hit record and return true.
+    rec.t = t;
+    rec.p = intersection;
+    rec.material_id = id;
+    rec.set_face_normal(r, quad.normal);
+
+    return true;
+}
+
+__device__ bool hit_triangle(const triangleData &triangle,const ray &r, float t_min, float t_max,hit_record& rec,int id) {
+    vec3 s = r.origin() - triangle.a;
+    vec3 s1 = cross(r.direction(), triangle.e2);
+    vec3 s2 = cross(s, triangle.e1);
+
+    float det = dot(s1,triangle.e1);
+    if (std::fabs(det) < 1e-8){return false;}
+
+    float s1e1 = 1.0 / det;
+
+    float tnear = s1e1 * dot(triangle.e2,s2);
+
+    float u11 = s1e1 * dot(s1,s);
+    float v11 = s1e1 * dot(s2,r.direction());
+
+
+    if (!contains(t_min,t_max,tnear))
+        return false;
+
+
+    if (u11 < 0 || v11 < 0 || u11 + v11 > 1){return false;}
+
+    auto w = 1.0 - u11 - v11;
+
+    rec.t = tnear;
+    rec.u = w * triangle.uv0.x + u11 * triangle.uv1.x + v11 * triangle.uv2.x;
+    rec.v = w * triangle.uv0.y + u11 * triangle.uv1.y + v11 * triangle.uv2.y;
+    rec.p = r.at(tnear);
+    rec.material_id = id;
+    rec.set_face_normal(r, triangle.normal);
+
+    return true;
+}
+
+
 
 __device__ bool hit_primitive(
     const primitive* prim,
@@ -87,8 +162,18 @@ __device__ bool hit_primitive(
                 }
                 break;
             case PRIM_triangle:
+                if (hit_triangle(triangles[prim[i].data_index], r, t_min, closest_so_far, temp_rec, prim[i].material_id)) {
+                    hit_anything = true;
+                    closest_so_far = temp_rec.t;
+                    rec = temp_rec;
+                }
                 break;
             case PRIM_quad:
+                if (hit_quad(quads[prim[i].data_index], r, t_min, closest_so_far, temp_rec, prim[i].material_id)) {
+                    hit_anything = true;
+                    closest_so_far = temp_rec.t;
+                    rec = temp_rec;
+                }
                 break;
         }
     }
@@ -421,6 +506,8 @@ class scene {
         checkCudaErrors(cudaDeviceSynchronize());
         checkCudaErrors(cudaFree(prims));
         checkCudaErrors(cudaFree(spheres));
+        checkCudaErrors(cudaFree(quads));
+        checkCudaErrors(cudaFree(triangles));
         checkCudaErrors(cudaFree(mats));
         checkCudaErrors(cudaFree(d_camera));
         checkCudaErrors(cudaFree(d_rand_state));

@@ -147,4 +147,16 @@ __host__ __device__ inline vec3 unit_vector(vec3 v) {
     return v / v.length();
 }
 
+
+
+struct vec2 {
+    float x;
+    float y;
+
+    __host__ __device__ vec2() : x(0), y(0) {}
+    __host__ __device__ vec2(float x, float y) : x(x), y(y) {}
+
+    __host__ __device__ vec2(float v) : x(v), y(v) {}
+};
+
 #endif
