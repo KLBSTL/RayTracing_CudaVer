@@ -34,10 +34,22 @@ public:
         std::vector<primitive>& prims,
         std::vector<triangleData>& triangles,
         std::vector<Material>& mats,
-        const Material& mat
+        const Material& mat,
+        vec3 target,
+        float scale,
+        float theta
     ) const {
+        vec3 min_p( infinity,  infinity,  infinity);
+        vec3 max_p(-infinity, -infinity, -infinity);
+
+        vec3 center(
+            0.5f * (bbox.x.min + bbox.x.max),
+            0.5f * (bbox.y.min + bbox.y.max),
+            0.5f * (bbox.z.min + bbox.z.max)
+        );
+
         for (const mesh& parsed_mesh : meshes) {
-            parsed_mesh.append_to_scene(prims, triangles, mats, mat);
+            parsed_mesh.append_to_scene(prims, triangles, mats, mat,center,scale,theta,target);
         }
     }
 

@@ -7,10 +7,11 @@
 
 #include <utility>
 #include <vector>
-
 #include "aabb.h"
 #include "material.h"
 #include "primitive.h"
+#include <algorithm>
+#include <cmath>
 
 class mesh {
 public:
@@ -29,7 +30,11 @@ public:
         std::vector<primitive>& prims,
         std::vector<triangleData>& triangles,
         std::vector<Material>& mats,
-        const Material& mat
+        const Material& mat,
+        vec3 center,
+        float scale,
+        float theta,
+        const vec3& target
     ) const {
         if (indices.size() < 3 || vertices.empty()) {
             return;
@@ -37,6 +42,9 @@ public:
 
         const int material_id = static_cast<int>(mats.size());
         mats.push_back(mat);
+
+        float cos_t = std::cos(theta);
+        float sin_t = std::sin(theta);
 
         for (size_t i = 0; i + 2 < indices.size(); i += 3) {
             const unsigned int i0 = indices[i];
@@ -47,21 +55,33 @@ public:
                 continue;
             }
 
-            const Vertex& v0 = vertices[i0];
-            const Vertex& v1 = vertices[i1];
-            const Vertex& v2 = vertices[i2];
+            auto p0_world = trans_pos(vertices[i0],center,cos_t,sin_t,target,scale);
+            auto p1_world = trans_pos(vertices[i1],center,cos_t,sin_t,target,scale);
+            auto p2_world = trans_pos(vertices[i2],center,cos_t,sin_t,target,scale);
 
             const int triangle_id = static_cast<int>(triangles.size());
             triangles.push_back(make_triangle(
-                v0.Position,
-                v1.Position,
-                v2.Position,
-                v0.TexCoords,
-                v1.TexCoords,
-                v2.TexCoords
+                p0_world,
+                p1_world,
+                p2_world,
+                vertices[i0].TexCoords,
+                vertices[i1].TexCoords,
+                vertices[i2].TexCoords
             ));
             prims.push_back({PRIM_triangle, triangle_id, material_id});
         }
+    }
+
+    vec3 trans_pos(const Vertex& v,vec3 center,float cos_t,float sin_t ,vec3 target,float scale) const {
+        vec3 q = scale * (v.Position - center);
+
+        vec3 rotated(
+            cos_t * q.x() + sin_t * q.z(),
+            q.y(),
+            -sin_t * q.x() + cos_t * q.z()
+        );
+
+        return rotated + target;
     }
 
 private:

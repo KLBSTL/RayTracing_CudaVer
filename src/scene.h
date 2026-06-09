@@ -573,7 +573,6 @@ void create_world(
         //     make_lambertian_material(vec3(0.10f, 0.45f, 0.95f))
         // );
 
-#if RT_ENABLE_ASSIMP_MODEL
         const std::string model_path = "D:/ClionFlies/rayTracingRenderer/resources/backpack/backpack.obj";
         Model backpack(model_path);
         if (backpack.loaded()) {
@@ -582,19 +581,13 @@ void create_world(
                 prim,
                 triangles,
                 mats,
-                make_lambertian_material(vec3(0.72f, 0.72f, 0.72f))
+                make_lambertian_material(vec3(0.72f, 0.72f, 0.72f)),
+                vec3(0.0f,1.0f,-2.0f),
+                0.9f,
+                0.5f
             );
             std::cerr << "Loaded model primitives: " << prim.size() - old_prim_count << "\n";
         }
-#endif
-
-
-        // vec3 lookfrom(13,2,3);
-        // vec3 lookat(0,0,0);
-        // float dist_to_focus = 10.0;
-        // float aperture = 0.1;
-        // *d_camera = new camera(lookfrom, lookat, vec3(0,1,0), 30.0, float(nx)/float(ny), aperture, dist_to_focus);
-
 }
 
 __global__ void clear_world(camera **d_camera) {
