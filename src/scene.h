@@ -21,6 +21,7 @@
 #include "ray.h"
 #include "vec3.h"
 #include "primitive.h"
+#include "bvh.h"
 #include "stb_image_write.h"
 
 
@@ -109,7 +110,7 @@ __device__ bool hit_triangle(const triangleData &triangle,const ray &r, float t_
     float det = dot(s1,triangle.e1);
     if (std::fabs(det) < 1e-8){return false;}
 
-    float s1e1 = 1.0 / det;
+    float s1e1 = 1.0f / det;
 
     float tnear = s1e1 * dot(triangle.e2,s2);
 
@@ -247,6 +248,76 @@ __device__ bool scatter_material(const Material &mat,const ray& r_in, const hit_
     return false;
 }
 
+__device__ bool hit_one_primitive(
+    const primitive& p,
+    const sphereData* spheres,
+    const triangleData* triangles,
+    const quadData* quads,
+    const ray& r,
+    float t_min,
+    float t_max,
+    hit_record& rec
+) {
+    switch (p.type) {
+        case PRIM_sphere:
+            return hit_sphere(spheres[p.data_index], r, t_min, t_max, rec, p.material_id);
+        case PRIM_triangle:
+            return hit_triangle(triangles[p.data_index], r, t_min, t_max, rec, p.material_id);
+        case PRIM_quad:
+            return hit_quad(quads[p.data_index], r, t_min, t_max, rec, p.material_id);
+    }
+    return false;
+}
+
+__device__ bool hit_bvh(
+    const BVHNode* nodes,
+    int root_index,
+    const primitive* prims,
+    const sphereData* spheres,
+    const triangleData* triangles,
+    const quadData* quads,
+    const ray& r,
+    float t_min,
+    float t_max,
+    hit_record& rec
+) {
+    hit_record temp_rec;
+    bool hit_anything = false;
+    float closest_so_far = t_max;
+
+    int stack[64];
+    int stack_size = 0;
+    stack[stack_size++] = root_index;
+
+    while (stack_size > 0) {
+        int node_index = stack[--stack_size];
+        BVHNode node = nodes[node_index];
+
+        if (!node.bbox.hit_bbox(r, interval(t_min, closest_so_far)))
+            continue;
+
+        if (node.is_leaf) {
+            const primitive& p = prims[node.prim_index];
+
+            if (hit_one_primitive(
+                p, spheres, triangles, quads,
+                r, t_min, closest_so_far, temp_rec
+            )) {
+                hit_anything = true;
+                closest_so_far = temp_rec.t;
+                rec = temp_rec;
+            }
+        } else {
+            if (stack_size + 2 <= 64) {
+                stack[stack_size++] = node.left;
+                stack[stack_size++] = node.right;
+            }
+        }
+    }
+
+    return hit_anything;
+}
+
 __device__ vec3 color(
     const ray& r,
     const primitive* prims,
@@ -255,13 +326,15 @@ __device__ vec3 color(
     const triangleData* triangles,
     const quadData* quads,
     const Material* mats,
+    const BVHNode* bvh_nodes,
+    int bvh_root,
     curandState* rng
 ) {
     ray cur_ray = r;
     vec3 cur_attenuation = vec3(1.0,1.0,1.0);
     for(int i = 0; i < 50; i++) {
         hit_record rec;
-        if (hit_primitive(prims,prim_count,spheres,triangles,quads,
+        if (hit_bvh(bvh_nodes,bvh_root,prims,spheres,triangles,quads,
             cur_ray, 0.001f, FLT_MAX, rec)) {
             ray scattered;
             vec3 attenuation;
@@ -284,9 +357,14 @@ __device__ vec3 color(
     return vec3(0.0,0.0,0.0);
 }
 
-__global__ void rand_init(curandState *rand_state) {
+__global__ void rand_init(curandState *rand_state,camera **d_camera,int nx,int ny) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         curand_init(1984, 0, 0, rand_state);
+        vec3 lookfrom(13,2,3);
+        vec3 lookat(0,0,0);
+        float dist_to_focus = 10.0;
+        float aperture = 0.1;
+        *d_camera = new camera(lookfrom, lookat, vec3(0,1,0), 30.0, float(nx)/float(ny), aperture, dist_to_focus);
     }
 }
 
@@ -305,6 +383,8 @@ __global__ void render(vec3 *fb, int max_x, int max_y, int ns, camera **cam,
     const triangleData* triangles,
     const quadData* quads,
     const Material* mats,
+    const BVHNode* bvh_nodes,
+    int bvh_root,
     curandState* rand_state) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int j = threadIdx.y + blockIdx.y * blockDim.y;
@@ -316,53 +396,59 @@ __global__ void render(vec3 *fb, int max_x, int max_y, int ns, camera **cam,
         float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
         float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
         ray r = (*cam)->get_ray(u, v, &local_rand_state);
-        col += color(r,prims,prim_count,spheres,triangles,quads,mats, &local_rand_state);
+        col += color(r,prims,prim_count,spheres,triangles,quads,mats,bvh_nodes,bvh_root, &local_rand_state);
     }
     rand_state[pixel_index] = local_rand_state;
     fb[pixel_index] = col;
 }
 
-#define RND (curand_uniform(&local_rand_state))
 
-__global__ void create_world(primitive *prim,sphereData *spheres,Material *mats, camera **d_camera, int nx, int ny, curandState *rand_state) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        curandState local_rand_state = *rand_state;
+void create_world(
+    std::vector<primitive> &prim,
+    std::vector<sphereData> &spheres,
+    std::vector<quadData> &quads,
+    std::vector<triangleData> &triangles,
+    std::vector<Material> &mats,
+    // camera **d_camera,
+    int nx, int ny)
+{
 
         prim[0] = {PRIM_sphere, 0, 0};
-        spheres[0] = {1000,vec3(0,-1000.0,-1)};
+        spheres[0] = make_sphere(vec3(0, -1000.0f, -1), 1000.0f);
 
         mats[0] = {Lambertian,vec3(0.5, 0.5, 0.5)};
-        // mats[1] = {Lambertian,vec3(RND*RND, RND*RND, RND*RND)};
-        // mats[2] = {Metal,vec3(0.5f*(1.0f+RND), 0.5f*(1.0f+RND), 0.5f*(1.0f+RND)),0.5f*(1.0f+RND)};
-        // mats[3] = {Dielectric,vec3(0,0,0),0,1.5};
 
         int p_id = 1;
         int s_id = 1;
+        int q_id = 0;
+        int t_id = 0;
+
+
         int m_id = 1;
         for(int a = -11; a < 11; a++) {
             for(int b = -11; b < 11; b++) {
-                float choose_mat = RND;
-                vec3 center(a+RND,0.2f + RND * 0.4f,b+RND);
+                float choose_mat = random();
+                vec3 center(a+random(),0.2f + random() * 0.4f,b+random());
                 if(choose_mat < 0.8f) {
-                    mats[m_id] = {Lambertian,vec3(RND*RND, RND*RND, RND*RND)};
+                    mats[m_id] = {Lambertian,vec3(random()*random(), random()*random(), random()*random())};
                     prim[p_id] = {PRIM_sphere, s_id, m_id};
-                    spheres[s_id] = {0.2f + RND * 0.1f,center};
+                    spheres[s_id] = make_sphere(center, 0.2f + random() * 0.1f);
                     p_id++;
                     s_id++;
                     m_id++;
                 }
                 else if(choose_mat < 0.95f) {
-                    mats[m_id] = {Metal,vec3(0.5f*(1.0f+RND), 0.5f*(1.0f+RND), 0.5f*(1.0f+RND)),0.5f*(1.0f+RND)};
+                    mats[m_id] = {Metal,vec3(0.5f*(1.0f+random()), 0.5f*(1.0f+random()), 0.5f*(1.0f+random())),0.5f*(1.0f+random())};
                     prim[p_id] = {PRIM_sphere, s_id, m_id};
-                    spheres[s_id] = {0.2f + RND * 0.1f,center};
+                    spheres[s_id] = make_sphere(center, 0.2f + random() * 0.1f);
                     p_id++;
                     s_id++;
                     m_id++;
                 }
                 else {
-                    mats[m_id] = {Dielectric,vec3(0,0,0),0,1.4f + RND * 0.2f};
+                    mats[m_id] = {Dielectric,vec3(0,0,0),0,1.4f + random() * 0.2f};
                     prim[p_id] = {PRIM_sphere, s_id, m_id};
-                    spheres[s_id] = {0.2f + RND * 0.1f,center};
+                    spheres[s_id] = make_sphere(center, 0.2f + random() * 0.1f);
                     p_id++;
                     s_id++;
                     m_id++;
@@ -370,14 +456,38 @@ __global__ void create_world(primitive *prim,sphereData *spheres,Material *mats,
             }
         }
 
-        *rand_state = local_rand_state;
 
-        vec3 lookfrom(13,2,3);
-        vec3 lookat(0,0,0);
-        float dist_to_focus = 10.0;
-        float aperture = 0.1;
-        *d_camera = new camera(lookfrom, lookat, vec3(0,1,0), 30.0, float(nx)/float(ny), aperture, dist_to_focus);
-    }
+        mats[m_id] = {Lambertian,vec3(0.95f, 0.18f, 0.12f)};
+        prim[p_id] = {PRIM_quad, q_id, m_id};
+        quads[q_id] = make_quad(
+            vec3(-1.7f, 0.8f, -1.2f),
+            vec3(3.4f, 0.0f, 0.0f),
+            vec3(0.0f, 2.1f, 0.0f)
+        );
+        p_id++;
+        q_id++;
+        m_id++;
+
+
+        mats[m_id] = {Lambertian,vec3(0.10f, 0.45f, 0.95f)};
+        prim[p_id] = {PRIM_triangle, t_id, m_id};
+        triangles[t_id] = make_triangle(
+            vec3(2.0f, 0.8f, 0.6f),
+            vec3(4.2f, 0.8f, -0.2f),
+            vec3(3.0f, 3.0f, 0.2f)
+        );
+        p_id++;
+        t_id++;
+        m_id++;
+
+
+
+        // vec3 lookfrom(13,2,3);
+        // vec3 lookat(0,0,0);
+        // float dist_to_focus = 10.0;
+        // float aperture = 0.1;
+        // *d_camera = new camera(lookfrom, lookat, vec3(0,1,0), 30.0, float(nx)/float(ny), aperture, dist_to_focus);
+
 }
 
 __global__ void clear_world(camera **d_camera) {
@@ -398,7 +508,10 @@ class scene {
     }
 
     void init() {
-        counts = 22*22 + 1;
+        int sphere_count = 22*22 + 1;
+        int quad_count = 1;
+        int triangle_count = 1;
+        counts = sphere_count + quad_count + triangle_count;
         num_pixels = nx*ny;
         fb_size = num_pixels*sizeof(vec3);
 
@@ -414,19 +527,49 @@ class scene {
         checkCudaErrors(cudaMalloc((void **)&d_rand_state, num_pixels*sizeof(curandState)));
         checkCudaErrors(cudaMalloc((void **)&d_rand_state2, 1*sizeof(curandState)));
 
-        rand_init<<<1,1>>>(d_rand_state2);
+        checkCudaErrors(cudaMalloc((void **)&d_camera, sizeof(camera *)));
+
+        rand_init<<<1,1>>>(d_rand_state2,d_camera,nx,ny);
 
         checkCudaErrors(cudaGetLastError());
         checkCudaErrors(cudaDeviceSynchronize());
 
 
+        h_prims.resize(counts);
+        h_spheres.resize(sphere_count);
+        h_quads.resize(quad_count);
+        h_triangles.resize(triangle_count);
+        h_mats.resize(counts);
+
+        create_world(h_prims,h_spheres,h_quads,h_triangles,h_mats,nx,ny);
+        h_bvh.build(h_prims, h_spheres.data(), h_triangles.data(), h_quads.data());
+
+
+        bvh_root = h_bvh.root_index;
+        bvh_node_count = h_bvh.nodes.size();
+
+        checkCudaErrors(cudaMalloc(&bvh_nodes, bvh_node_count * sizeof(BVHNode)));
+        checkCudaErrors(cudaMemcpy(bvh_nodes, h_bvh.nodes.data(),
+                   bvh_node_count * sizeof(BVHNode),
+                   cudaMemcpyHostToDevice));
+
+
         checkCudaErrors(cudaMalloc(&prims, counts*sizeof(primitive)));
-        checkCudaErrors(cudaMalloc(&spheres, counts * sizeof(sphereData)));
+        checkCudaErrors(cudaMalloc(&spheres, sphere_count * sizeof(sphereData)));
+        checkCudaErrors(cudaMalloc(&quads, quad_count * sizeof(quadData)));
+        checkCudaErrors(cudaMalloc(&triangles, triangle_count * sizeof(triangleData)));
         checkCudaErrors(cudaMalloc(&mats, counts * sizeof(Material)));
-        checkCudaErrors(cudaMalloc((void **)&d_camera, sizeof(camera *)));
 
 
-        create_world<<<1,1>>>(prims,spheres,mats, d_camera, nx, ny, d_rand_state2);
+        checkCudaErrors(cudaMemcpy(prims,h_prims.data(),sizeof(primitive) * h_prims.size(),cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpy(spheres,h_spheres.data(),sizeof(sphereData) * h_spheres.size(),cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpy(quads,h_quads.data(),sizeof(quadData) * h_quads.size(),cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpy(triangles,h_triangles.data(),sizeof(triangleData) * h_triangles.size(),cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpy(mats,h_mats.data(),sizeof(Material) * h_mats.size(),cudaMemcpyHostToDevice));
+
+
+
+        // create_world<<<1,1>>>(prims,spheres,quads,triangles,mats, d_camera, nx, ny, d_rand_state2);
         checkCudaErrors(cudaGetLastError());
         checkCudaErrors(cudaDeviceSynchronize());
 
@@ -458,11 +601,11 @@ class scene {
     void write_color_buffer(std::vector<unsigned char> &image, int x, int y,
         int image_width, const vec3 &pixel_color, int samples_per_pixel)
     {
-        double r = pixel_color.x();
-        double g = pixel_color.y();
-        double b = pixel_color.z();
+        float r = pixel_color.x();
+        float g = pixel_color.y();
+        float b = pixel_color.z();
 
-        double scale = 1.0 / samples_per_pixel;
+        float scale = 1.0f / samples_per_pixel;
 
         r = std::sqrt(scale * r);
         g = std::sqrt(scale * g);
@@ -474,9 +617,9 @@ class scene {
 
         int index = 3 * (y * image_width + x);
 
-        image[index + 0] = static_cast<unsigned char>(256 * std::clamp(r, 0.0, 0.999));
-        image[index + 1] = static_cast<unsigned char>(256 * std::clamp(g, 0.0, 0.999));
-        image[index + 2] = static_cast<unsigned char>(256 * std::clamp(b, 0.0, 0.999));
+        image[index + 0] = static_cast<unsigned char>(256.0f * std::clamp(r, 0.0f, 0.999f));
+        image[index + 1] = static_cast<unsigned char>(256.0f * std::clamp(g, 0.0f, 0.999f));
+        image[index + 2] = static_cast<unsigned char>(256.0f * std::clamp(b, 0.0f, 0.999f));
     }
 
 
@@ -491,7 +634,7 @@ class scene {
         checkCudaErrors(cudaGetLastError());
         checkCudaErrors(cudaDeviceSynchronize());
         render<<<blocks, threads>>>(fb, nx, ny,  ns, d_camera, prims,counts,spheres,triangles,
-            quads,mats,d_rand_state);
+            quads,mats,bvh_nodes,bvh_root,d_rand_state);
         checkCudaErrors(cudaGetLastError());
         checkCudaErrors(cudaDeviceSynchronize());
 
@@ -516,6 +659,7 @@ class scene {
         checkCudaErrors(cudaFree(quads));
         checkCudaErrors(cudaFree(triangles));
         checkCudaErrors(cudaFree(mats));
+        checkCudaErrors(cudaFree(bvh_nodes));
         checkCudaErrors(cudaFree(d_camera));
         checkCudaErrors(cudaFree(d_rand_state));
         checkCudaErrors(cudaFree(d_rand_state2));
@@ -531,15 +675,23 @@ private:
     int tx = 16;
     int ty = 16;
 
+    primitive *prims;
     Material *mats = nullptr;
     sphereData * spheres = nullptr;
     triangleData * triangles = nullptr;
     quadData * quads = nullptr;
     camera **d_camera = nullptr;
 
+    std::vector<primitive> h_prims;
+    std::vector<sphereData> h_spheres;
+    std::vector<quadData> h_quads;
+    std::vector<triangleData> h_triangles;
+    std::vector<Material> h_mats;
+    bvh h_bvh;
+
     int counts;
 
-    primitive *prims;
+
     vec3 *fb;
     int num_pixels;
     size_t fb_size;
@@ -552,6 +704,10 @@ private:
     curandState *d_rand_state;
     curandState *d_rand_state2;
 
+
+    BVHNode* bvh_nodes = nullptr;
+    int bvh_root = -1;
+    int bvh_node_count = 0;
 
 
     std::vector<unsigned char> image;

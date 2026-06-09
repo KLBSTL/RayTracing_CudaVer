@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <iostream>
 #include <cuda_runtime.h>
+#include <random>
 
 class vec3  {
 
@@ -56,7 +57,7 @@ inline std::ostream& operator<<(std::ostream &os, const vec3 &t) {
 }
 
 __host__ __device__ inline void vec3::make_unit_vector() {
-    float k = 1.0 / sqrt(e[0]*e[0] + e[1]*e[1] + e[2]*e[2]);
+    float k = 1.0f / sqrt(e[0]*e[0] + e[1]*e[1] + e[2]*e[2]);
     e[0] *= k; e[1] *= k; e[2] *= k;
 }
 
@@ -158,5 +159,18 @@ struct vec2 {
 
     __host__ __device__ vec2(float v) : x(v), y(v) {}
 };
+
+
+inline float random() {
+    thread_local static std::mt19937 generator(std::random_device{}());
+    thread_local static std::uniform_real_distribution<float> distribution(0.0, 1.0);
+    return distribution(generator);
+}
+
+// 生成 [min, max) 范围内的随机 float。
+inline float random(float min, float max) {
+    return min + (max - min) * random();
+}
+
 
 #endif
