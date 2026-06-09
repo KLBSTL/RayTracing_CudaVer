@@ -332,33 +332,40 @@ __global__ void create_world(primitive *prim,sphereData *spheres,Material *mats,
         spheres[0] = {1000,vec3(0,-1000.0,-1)};
 
         mats[0] = {Lambertian,vec3(0.5, 0.5, 0.5)};
-        mats[1] = {Lambertian,vec3(RND*RND, RND*RND, RND*RND)};
-        mats[2] = {Metal,vec3(0.5f*(1.0f+RND), 0.5f*(1.0f+RND), 0.5f*(1.0f+RND)),0.5f*(1.0f+RND)};
-        mats[3] = {Dielectric,vec3(0,0,0),0,1.5};
+        // mats[1] = {Lambertian,vec3(RND*RND, RND*RND, RND*RND)};
+        // mats[2] = {Metal,vec3(0.5f*(1.0f+RND), 0.5f*(1.0f+RND), 0.5f*(1.0f+RND)),0.5f*(1.0f+RND)};
+        // mats[3] = {Dielectric,vec3(0,0,0),0,1.5};
 
         int p_id = 1;
         int s_id = 1;
+        int m_id = 1;
         for(int a = -11; a < 11; a++) {
             for(int b = -11; b < 11; b++) {
                 float choose_mat = RND;
-                vec3 center(a+RND,0.2,b+RND);
+                vec3 center(a+RND,0.2f + RND * 0.4f,b+RND);
                 if(choose_mat < 0.8f) {
-                    prim[p_id] = {PRIM_sphere, s_id, 1};
-                    spheres[s_id] = {0.2,center};
+                    mats[m_id] = {Lambertian,vec3(RND*RND, RND*RND, RND*RND)};
+                    prim[p_id] = {PRIM_sphere, s_id, m_id};
+                    spheres[s_id] = {0.2f + RND * 0.1f,center};
                     p_id++;
                     s_id++;
+                    m_id++;
                 }
                 else if(choose_mat < 0.95f) {
-                    prim[p_id] = {PRIM_sphere, s_id, 2};
-                    spheres[s_id] = {0.2,center};
+                    mats[m_id] = {Metal,vec3(0.5f*(1.0f+RND), 0.5f*(1.0f+RND), 0.5f*(1.0f+RND)),0.5f*(1.0f+RND)};
+                    prim[p_id] = {PRIM_sphere, s_id, m_id};
+                    spheres[s_id] = {0.2f + RND * 0.1f,center};
                     p_id++;
                     s_id++;
+                    m_id++;
                 }
                 else {
-                    prim[p_id] = {PRIM_sphere, s_id, 3};
-                    spheres[s_id] = {0.2,center};
+                    mats[m_id] = {Dielectric,vec3(0,0,0),0,1.4f + RND * 0.2f};
+                    prim[p_id] = {PRIM_sphere, s_id, m_id};
+                    spheres[s_id] = {0.2f + RND * 0.1f,center};
                     p_id++;
                     s_id++;
+                    m_id++;
                 }
             }
         }
@@ -415,7 +422,7 @@ class scene {
 
         checkCudaErrors(cudaMalloc(&prims, counts*sizeof(primitive)));
         checkCudaErrors(cudaMalloc(&spheres, counts * sizeof(sphereData)));
-        checkCudaErrors(cudaMalloc(&mats, 5 * sizeof(Material)));
+        checkCudaErrors(cudaMalloc(&mats, counts * sizeof(Material)));
         checkCudaErrors(cudaMalloc((void **)&d_camera, sizeof(camera *)));
 
 
